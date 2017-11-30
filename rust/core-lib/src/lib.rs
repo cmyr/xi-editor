@@ -139,4 +139,8 @@ impl Handler for MainState {
     fn idle(&mut self, _ctx: &RpcCtx, token: usize) {
         self.tabs.handle_idle(token);
     }
+
+    fn trace_name(&self) -> &'static str {
+        "xi-core"
+    }
 }

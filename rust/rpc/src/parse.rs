@@ -106,6 +106,15 @@ impl RpcObject {
         self.0.get("id").is_some() && self.0.get("method").is_none()
     }
 
+    pub fn get_trace(&self) -> Option<usize> {
+        self.0.get("trace").and_then(Value::as_u64)
+            .map(|v| v as usize)
+    }
+
+    pub fn is_builtin(&self) -> bool {
+        self.get_method() == Some("xi-rpc.show_trace")
+    }
+
     /// Attempts to convert the underlying `Value` into an RPC response
     /// object, and returns the result.
     ///
@@ -259,5 +268,17 @@ mod tests {
         let json = r#"{"code": -32600, "message": "Invalid Request"}"#;
         let e = serde_json::from_str::<RemoteError>(json).unwrap();
         assert_eq!(e, RemoteError::InvalidRequest(None));
+    }
+
+    #[test]
+    fn get_method() {
+        let json = json!({
+            "method": "xi-rpc.show_trace",
+            "params": {}
+        });
+
+        let obj = RpcObject(json);
+        assert_eq!(obj.get_method(), Some("xi-rpc.show_trace"));
+        assert!(obj.is_builtin())
     }
 }

@@ -28,9 +28,11 @@ extern crate serde_json;
 extern crate serde_derive;
 extern crate serde;
 extern crate crossbeam;
+extern crate libc;
 
 mod parse;
 mod error;
+mod trace;
 
 pub mod test_utils;
 
@@ -38,6 +40,7 @@ use std::collections::{BTreeMap, VecDeque};
 use std::io::{self, BufRead, Write};
 use std::sync::{Arc, Mutex, Condvar};
 use std::sync::mpsc;
+use std::mem;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
@@ -45,8 +48,19 @@ use serde_json::Value;
 use serde::de::DeserializeOwned;
 
 use parse::{Call, Response, RpcObject, MessageReader};
+use trace::{Trace, merge_traces, CowStr};
+
+//pub use trace::{get_trace, trace_event};
 pub use error::{Error, ReadError, RemoteError};
 
+//#[macro_export]
+//macro_rules! trace_rpc {
+    //($e:expr) => {
+        //if get_trace().is_some() {
+            //trace_event($e);
+        //}
+    //}
+//}
 
 /// An interface to access the other side of the RPC channel. The main purpose
 /// is to send RPC requests and notifications to the peer.
@@ -82,6 +96,7 @@ pub trait Peer: Send + 'static {
     /// done in the background.
     fn request_is_pending(&self) -> bool;
     fn schedule_idle(&self, token: usize);
+    fn trace_event(&self, label: CowStr);
 }
 
 /// The `Peer` trait object.
@@ -91,11 +106,11 @@ pub struct RpcCtx {
     peer: RpcPeer,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
 /// An RPC command.
 ///
 /// This type is used as a placeholder in various places, and can be
 /// used by clients as a catchall type for implementing `MethodHandler`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RpcCall {
     pub method: String,
     pub params: Value,
@@ -114,6 +129,9 @@ pub trait Handler {
                       -> Result<Value, RemoteError>;
     #[allow(unused_variables)]
     fn idle(&mut self, ctx: &RpcCtx, token: usize) {}
+    fn trace_name(&self) -> &'static str {
+        "xi-rpc"
+    }
 }
 
 pub trait Callback: Send {
@@ -159,6 +177,9 @@ struct RpcState<W: Write> {
     id: AtomicUsize,
     pending: Mutex<BTreeMap<usize, ResponseHandler>>,
     idle_queue: Mutex<VecDeque<usize>>,
+    trace_id: AtomicUsize,
+    traces: Mutex<BTreeMap<usize, Trace>>,
+    //trace_events: Mutex<Vec<RawEvent>>,
 }
 
 /// A structure holding the state of a main loop for handling RPC's.
@@ -178,6 +199,8 @@ impl<W: Write + Send> RpcLoop<W> {
             id: AtomicUsize::new(0),
             pending: Mutex::new(BTreeMap::new()),
             idle_queue: Mutex::new(VecDeque::new()),
+            trace_id: AtomicUsize::new(0),
+            traces: Mutex::new(BTreeMap::new()),
         }));
         RpcLoop {
             reader: MessageReader::default(),
@@ -213,6 +236,7 @@ impl<W: Write + Send> RpcLoop<W> {
           RF: Send + FnOnce() -> R,
           H: Handler,
     {
+        let trace_name = handler.trace_name().clone();
 
         let exit = crossbeam::scope(|scope| {
             let peer = self.get_raw_peer();
@@ -225,10 +249,15 @@ impl<W: Write + Send> RpcLoop<W> {
                     let json = match self.reader.next(&mut stream) {
                         Ok(json) => json,
                         Err(err) => {
+                            eprintln!("err {:?}", err);
                             self.peer.put_rx(Err(err));
                             break
                         }
                     };
+
+                    let trace = json.get_trace();
+                    self.peer.set_trace(trace, trace_name);
+
                     if json.is_response() {
                         let id = json.get_id().unwrap();
                         match json.into_response() {
@@ -250,6 +279,7 @@ impl<W: Write + Send> RpcLoop<W> {
 
             loop {
                 let read_result = next_read(&peer, handler, &ctx);
+                peer.trace_event("dequeued".into());
 
                 let json = match read_result {
                     Ok(json) => json,
@@ -264,6 +294,12 @@ impl<W: Write + Send> RpcLoop<W> {
                     }
                 };
 
+                if json.is_builtin() {
+                    handle_builtin(&peer, json);
+                    continue
+                }
+
+                peer.trace_event("handler.start".into());
                 match json.into_rpc::<H::Notification, H::Request>() {
                     Ok(Call::Request(id, cmd)) => {
                         let result = handler.handle_request(&ctx, cmd);
@@ -276,6 +312,7 @@ impl<W: Write + Send> RpcLoop<W> {
                         return ReadError::UnknownRequest(err)
                     }
                 }
+                peer.trace_event("handler.finish".into());
             }
         });
         if exit.is_disconnect() {
@@ -284,6 +321,26 @@ impl<W: Write + Send> RpcLoop<W> {
             Err(exit)
         }
     }
+}
+
+fn handle_builtin<W: Write>(peer: &RawPeer<W>, obj: RpcObject) {
+
+    let mut client: Vec<Trace> = serde_json::from_value(obj.0["params"].clone())
+        .unwrap();
+    let client_ids: Vec<usize> = client.iter().map(|t| t.trace_id).collect();
+    let client: BTreeMap<usize, Trace> = client_ids.iter()
+        .cloned()
+        .zip(client.drain(..))
+        .collect();
+
+    let core = {
+        let mut core = peer.0.traces.lock().unwrap();
+        let core = mem::replace(&mut *core, BTreeMap::new());
+        core
+    };
+
+    let mut traces = vec![client, core];
+    merge_traces(&mut traces)
 }
 
 /// Returns the next read result, checking for idle work when no
@@ -328,10 +385,18 @@ impl<W: Write + Send + 'static> Peer for RawPeer<W> {
     }
 
     fn send_rpc_notification(&self, method: &str, params: &Value) {
-        if let Err(e) = self.send(&json!({
+        let mut msg = json!({
             "method": method,
             "params": params,
-        })) {
+        });
+
+        let trace_id = self.0.trace_id.load(Ordering::Relaxed);
+        if trace_id != 0 {
+            msg["trace"] = json!(trace_id);
+            self.trace_event(format!("{}.send", method).into());
+        }
+
+        if let Err(e) = self.send(&msg) {
             eprintln!("send error on send_rpc_notification method {}: {}",
                        method, e);
         }
@@ -359,6 +424,9 @@ impl<W: Write + Send + 'static> Peer for RawPeer<W> {
         self.0.idle_queue.lock().unwrap().push_back(token);
     }
 
+    fn trace_event(&self, label: CowStr) {
+        self.add_trace_event(label);
+    }
 }
 
 impl<W:Write> RawPeer<W> {
@@ -387,11 +455,20 @@ impl<W:Write> RawPeer<W> {
             let mut pending = self.0.pending.lock().unwrap();
             pending.insert(id, rh);
         }
-        if let Err(e) = self.send(&json!({
+
+        let mut msg = json!({
             "id": id,
             "method": method,
             "params": params,
-        })) {
+        });
+
+        let trace_id = self.0.trace_id.load(Ordering::Relaxed);
+        if trace_id != 0 {
+            msg["trace"] = json!(trace_id);
+            self.add_trace_event(format!("sending {}", method));
+        }
+
+        if let Err(e) = self.send(&msg) {
             let mut pending = self.0.pending.lock().unwrap();
             if let Some(rh) = pending.remove(&id) {
                 rh.invoke(Err(Error::Io(e)));
@@ -446,6 +523,28 @@ impl<W:Write> RawPeer<W> {
         for id in ids.iter() {
             let callback = pending.remove(id).unwrap();
             callback.invoke(Err(Error::PeerDisconnect));
+        }
+    }
+
+    fn set_trace(&self, trace_id: Option<usize>, name: &'static str) {
+        let trace_id = trace_id.unwrap_or(0);
+        self.0.trace_id.store(trace_id, Ordering::Relaxed);
+        if trace_id > 0 {
+            let src_name = name.to_owned();
+            let mut traces = self.0.traces.lock().unwrap();
+            let trace = Trace::new(trace_id, src_name);
+            traces.insert(trace_id, trace);
+        }
+    }
+
+    fn add_trace_event<S: Into<CowStr>>(&self, label: S) {
+        let label = label.into();
+        let trace_id = self.0.trace_id.load(Ordering::Relaxed);
+        if trace_id > 0 {
+        let mut traces = self.0.traces.lock().unwrap();
+        let trace = traces.get_mut(&trace_id)
+            .expect("trace group missing");
+        trace.add_event(label);
         }
     }
 }

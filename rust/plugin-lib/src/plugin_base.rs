@@ -266,6 +266,10 @@ impl<'a, H: Handler> xi_rpc::Handler for MyHandler<'a, H> {
     fn idle(&mut self, ctx: &RpcCtx, token: usize) {
         self.0.idle(PluginCtx(ctx), token);
     }
+
+    fn trace_name(&self) -> &'static str {
+        "xi-plugin"
+    }
 }
 
 pub fn mainloop<H: Handler>(handler: &mut H) -> Result<(), ReadError> {
