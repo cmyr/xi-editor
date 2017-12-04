@@ -48,19 +48,10 @@ use serde_json::Value;
 use serde::de::DeserializeOwned;
 
 use parse::{Call, Response, RpcObject, MessageReader};
-use trace::{Trace, merge_traces, CowStr};
 
-//pub use trace::{get_trace, trace_event};
 pub use error::{Error, ReadError, RemoteError};
+pub use trace::{Trace, Timestamp, CowStr};
 
-//#[macro_export]
-//macro_rules! trace_rpc {
-    //($e:expr) => {
-        //if get_trace().is_some() {
-            //trace_event($e);
-        //}
-    //}
-//}
 
 /// An interface to access the other side of the RPC channel. The main purpose
 /// is to send RPC requests and notifications to the peer.
@@ -96,7 +87,13 @@ pub trait Peer: Send + 'static {
     /// done in the background.
     fn request_is_pending(&self) -> bool;
     fn schedule_idle(&self, token: usize);
-    fn trace_event(&self, label: CowStr);
+    fn collect_traces(&self) -> Vec<Trace>;
+
+    fn send_trace_rpc_request_async(&self, method: &str, params: &Value,
+                                    f: Box<Callback>, trace: Timestamp);
+
+    fn send_trace_rpc_notification(&self, method: &str, params: &Value,
+                                   trace: Timestamp);
 }
 
 /// The `Peer` trait object.
@@ -104,6 +101,7 @@ pub type RpcPeer = Box<Peer>;
 
 pub struct RpcCtx {
     peer: RpcPeer,
+    trace: Timestamp,
 }
 
 /// An RPC command.
@@ -129,9 +127,9 @@ pub trait Handler {
                       -> Result<Value, RemoteError>;
     #[allow(unused_variables)]
     fn idle(&mut self, ctx: &RpcCtx, token: usize) {}
-    fn trace_name(&self) -> &'static str {
-        "xi-rpc"
-    }
+
+    fn trace_name(&self) -> CowStr { "xi-rpc".into() }
+    fn collect_traces(&self) -> Vec<Trace> { Vec::new() }
 }
 
 pub trait Callback: Send {
@@ -178,8 +176,7 @@ struct RpcState<W: Write> {
     pending: Mutex<BTreeMap<usize, ResponseHandler>>,
     idle_queue: Mutex<VecDeque<usize>>,
     trace_id: AtomicUsize,
-    traces: Mutex<BTreeMap<usize, Trace>>,
-    //trace_events: Mutex<Vec<RawEvent>>,
+    traces: Mutex<Vec<Trace>>,
 }
 
 /// A structure holding the state of a main loop for handling RPC's.
@@ -200,7 +197,7 @@ impl<W: Write + Send> RpcLoop<W> {
             pending: Mutex::new(BTreeMap::new()),
             idle_queue: Mutex::new(VecDeque::new()),
             trace_id: AtomicUsize::new(0),
-            traces: Mutex::new(BTreeMap::new()),
+            traces: Mutex::new(Vec::new()),
         }));
         RpcLoop {
             reader: MessageReader::default(),
@@ -236,12 +233,11 @@ impl<W: Write + Send> RpcLoop<W> {
           RF: Send + FnOnce() -> R,
           H: Handler,
     {
-        let trace_name = handler.trace_name().clone();
-
         let exit = crossbeam::scope(|scope| {
             let peer = self.get_raw_peer();
-            let ctx = RpcCtx {
+            let mut ctx = RpcCtx {
                 peer: Box::new(peer.clone()),
+                trace: 0,
             };
             scope.spawn(move|| {
                 let mut stream = rf();
@@ -256,9 +252,23 @@ impl<W: Write + Send> RpcLoop<W> {
                     };
 
                     let trace = json.get_trace();
-                    self.peer.set_trace(trace, trace_name);
 
+                    // we have to handle responses on this thread;
+                    // if this was a sync request, the main thread
+                    // will be blocked on the response.
                     if json.is_response() {
+                        // in the response case, we update the active trace here.
+                        // otherwise we wait until the RPC is dequeued, because
+                        // the main thread is working on some earlier RPC
+                        self.peer.0.trace_id.store(trace as usize, Ordering::Relaxed);
+                        if trace > 0 {
+                            let label = match json.is_error() {
+                                true => "recv.err",
+                                false => "recv.resp",
+                            };
+                            self.peer.add_trace(label, Some(trace), None);
+                        }
+
                         let id = json.get_id().unwrap();
                         match json.into_response() {
                             Ok(resp) => {
@@ -279,9 +289,8 @@ impl<W: Write + Send> RpcLoop<W> {
 
             loop {
                 let read_result = next_read(&peer, handler, &ctx);
-                peer.trace_event("dequeued".into());
 
-                let json = match read_result {
+                let mut json = match read_result {
                     Ok(json) => json,
                     Err(err) => {
                         // finish idle work before disconnecting;
@@ -294,25 +303,37 @@ impl<W: Write + Send> RpcLoop<W> {
                     }
                 };
 
+                let mut trace = json.get_trace();
+                if trace > 0 {
+                    // we add two traces; one uses the stashed timestamp
+                    //  (enqueue time) and the other usess now (dequeue time)
+                    let label = format!("recv.{}", json.get_method().unwrap());
+                    //peer.add_trace(label, Some(trace), Some(timestamp));
+                    trace = peer.add_trace(label, Some(trace), None);
+                    peer.0.trace_id.store(trace as usize, Ordering::Relaxed);
+                } else {
+                    peer.0.trace_id.store(trace as usize, Ordering::Relaxed);
+                }
+
                 if json.is_builtin() {
-                    handle_builtin(&peer, json);
+                    handle_builtin(&peer, json, handler);
                     continue
                 }
 
-                peer.trace_event("handler.start".into());
+                ctx.trace = trace;
                 match json.into_rpc::<H::Notification, H::Request>() {
                     Ok(Call::Request(id, cmd)) => {
                         let result = handler.handle_request(&ctx, cmd);
                         peer.respond(result, id);
                     }
-                    Ok(Call::Notification(cmd)) => handler.handle_notification(&ctx, cmd),
+                    Ok(Call::Notification(cmd)) =>
+                        handler.handle_notification(&ctx, cmd),
                     Ok(Call::InvalidRequest(id, err)) => peer.respond(Err(err), id),
                     Err(err) => {
                         peer.disconnect();
                         return ReadError::UnknownRequest(err)
                     }
                 }
-                peer.trace_event("handler.finish".into());
             }
         });
         if exit.is_disconnect() {
@@ -323,24 +344,53 @@ impl<W: Write + Send> RpcLoop<W> {
     }
 }
 
-fn handle_builtin<W: Write>(peer: &RawPeer<W>, obj: RpcObject) {
+use std::path::PathBuf;
+use std::fs::File;
 
-    let mut client: Vec<Trace> = serde_json::from_value(obj.0["params"].clone())
-        .unwrap();
-    let client_ids: Vec<usize> = client.iter().map(|t| t.trace_id).collect();
-    let client: BTreeMap<usize, Trace> = client_ids.iter()
-        .cloned()
-        .zip(client.drain(..))
-        .collect();
+fn handle_builtin<W, H>(peer: &RawPeer<W>, obj: RpcObject, h: &H)
+    where W: Write,
+          H: Handler,
+{
+    match obj.get_method() {
+        Some("xi-rpc.collect_traces") => {
+            let core = {
+                let mut core = peer.0.traces.lock().unwrap();
+                mem::replace(&mut *core, Vec::new())
+            };
+            let response = Ok(serde_json::to_value(core).unwrap());
+            peer.respond(response, obj.get_id().unwrap());
+        }
+        Some("xi-rpc.show_trace") => {
+            let mut client: Vec<Trace> = serde_json::from_value(obj.0["params"].clone())
+                .unwrap();
 
-    let core = {
-        let mut core = peer.0.traces.lock().unwrap();
-        let core = mem::replace(&mut *core, BTreeMap::new());
-        core
-    };
+            let mut core = {
+                let mut core = peer.0.traces.lock().unwrap();
+                mem::replace(&mut *core, Vec::new())
+            };
 
-    let mut traces = vec![client, core];
-    merge_traces(&mut traces)
+            let core_name: CowStr = h.trace_name().into();
+            core.iter_mut()
+                .for_each(|t| t.proc_name = core_name.clone());
+
+            let mut traces = h.collect_traces();
+            traces.append(&mut client);
+            traces.append(&mut core);
+
+            let mut n = 0;
+            loop {
+                let p = PathBuf::from(format!("../trace_{}.json", n));
+                eprintln!("trying {:?}", &p);
+                if p.exists() { n += 1; continue }
+                let mut f = File::create(&p).expect("create file failed");
+                let json = serde_json::to_string(&traces).unwrap();
+                f.write_all(json.as_bytes()).expect("trace write failed");
+                eprintln!("saved trace: {:?}", &p.canonicalize());
+                break
+            }
+        }
+        other => panic!("unexpected builtin {:?}", other),
+    }
 }
 
 /// Returns the next read result, checking for idle work when no
@@ -376,6 +426,10 @@ impl RpcCtx {
     pub fn schedule_idle(&self, token: usize) {
         self.peer.schedule_idle(token)
     }
+
+    pub fn get_active_trace(&self) -> Timestamp {
+        self.trace
+    }
 }
 
 impl<W: Write + Send + 'static> Peer for RawPeer<W> {
@@ -390,13 +444,7 @@ impl<W: Write + Send + 'static> Peer for RawPeer<W> {
             "params": params,
         });
 
-        let trace_id = self.0.trace_id.load(Ordering::Relaxed);
-        if trace_id != 0 {
-            msg["trace"] = json!(trace_id);
-            self.trace_event(format!("{}.send", method).into());
-        }
-
-        if let Err(e) = self.send(&msg) {
+        if let Err(e) = self.send(&mut msg, method) {
             eprintln!("send error on send_rpc_notification method {}: {}",
                        method, e);
         }
@@ -424,13 +472,35 @@ impl<W: Write + Send + 'static> Peer for RawPeer<W> {
         self.0.idle_queue.lock().unwrap().push_back(token);
     }
 
-    fn trace_event(&self, label: CowStr) {
-        self.add_trace_event(label);
+    fn collect_traces(&self) -> Vec<Trace> {
+        let mut core = self.0.traces.lock().unwrap();
+        let traces = mem::replace(&mut *core, Vec::new());
+        traces
+    }
+
+    fn send_trace_rpc_request_async(&self, method: &str, params: &Value,
+                                    f: Box<Callback>, trace: Timestamp) {
+        self.0.trace_id.store(trace as usize, Ordering::Relaxed);
+        self.send_rpc_request_common(method, params,
+                                     ResponseHandler::Callback(f));
+    }
+
+    fn send_trace_rpc_notification(&self, method: &str, params: &Value,
+                                   trace: Timestamp) {
+        self.0.trace_id.store(trace as usize, Ordering::Relaxed);
+        self.send_rpc_notification(method, params);
     }
 }
 
 impl<W:Write> RawPeer<W> {
-    fn send(&self, v: &Value) -> Result<(), io::Error> {
+    fn send(&self, v: &mut Value, trace_label: &str) -> Result<(), io::Error> {
+        let prev_trace = self.0.trace_id.load(Ordering::Relaxed) as u64;
+        if prev_trace != 0 {
+            let label = format!("send.{}", trace_label);
+            let timestamp = self.add_trace(label, Some(prev_trace), None);
+            v["trace"] = json!(timestamp);
+        }
+
         let mut s = serde_json::to_string(v).unwrap();
         s.push('\n');
         self.0.writer.lock().unwrap().write_all(s.as_bytes())
@@ -443,7 +513,7 @@ impl<W:Write> RawPeer<W> {
             Ok(result) => response["result"] = result,
             Err(error) => response["error"] = json!(error),
         };
-        if let Err(e) = self.send(&response) {
+        if let Err(e) = self.send(&mut response, "resp") {
             eprintln!("error {} sending response to RPC {:?}", e, id);
         }
     }
@@ -462,13 +532,7 @@ impl<W:Write> RawPeer<W> {
             "params": params,
         });
 
-        let trace_id = self.0.trace_id.load(Ordering::Relaxed);
-        if trace_id != 0 {
-            msg["trace"] = json!(trace_id);
-            self.add_trace_event(format!("sending {}", method));
-        }
-
-        if let Err(e) = self.send(&msg) {
+        if let Err(e) = self.send(&mut msg, method) {
             let mut pending = self.0.pending.lock().unwrap();
             if let Some(rh) = pending.remove(&id) {
                 rh.invoke(Err(Error::Io(e)));
@@ -526,26 +590,16 @@ impl<W:Write> RawPeer<W> {
         }
     }
 
-    fn set_trace(&self, trace_id: Option<usize>, name: &'static str) {
-        let trace_id = trace_id.unwrap_or(0);
-        self.0.trace_id.store(trace_id, Ordering::Relaxed);
-        if trace_id > 0 {
-            let src_name = name.to_owned();
-            let mut traces = self.0.traces.lock().unwrap();
-            let trace = Trace::new(trace_id, src_name);
-            traces.insert(trace_id, trace);
-        }
-    }
-
-    fn add_trace_event<S: Into<CowStr>>(&self, label: S) {
+    fn add_trace<S>(&self, label: S, parent: Option<Timestamp>,
+                    timestamp: Option<Timestamp>) -> Timestamp
+        where S: Into<CowStr>,
+    {
         let label = label.into();
-        let trace_id = self.0.trace_id.load(Ordering::Relaxed);
-        if trace_id > 0 {
+        let trace = Trace::new(label, parent, timestamp);
+        let timestamp = trace.timestamp;
         let mut traces = self.0.traces.lock().unwrap();
-        let trace = traces.get_mut(&trace_id)
-            .expect("trace group missing");
-        trace.add_event(label);
-        }
+        traces.push(trace);
+        timestamp
     }
 }
 

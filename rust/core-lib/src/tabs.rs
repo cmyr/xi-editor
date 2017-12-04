@@ -20,7 +20,7 @@ use std::fmt;
 use std::io::{self, Read};
 use std::path::{PathBuf, Path};
 use std::fs::File;
-use std::sync::{Arc, Mutex, MutexGuard, Weak, mpsc};
+use std::sync::{Arc, Mutex, MutexGuard, Weak, mpsc, atomic};
 
 use serde::de::{Deserialize, Deserializer};
 use serde::ser::{Serialize, Serializer};
@@ -28,7 +28,7 @@ use serde_json::value::Value;
 use notify::{RecursiveMode, DebouncedEvent};
 
 use xi_rope::rope::Rope;
-use xi_rpc::{RpcCtx, RemoteError};
+use xi_rpc::{RpcCtx, RemoteError, Trace, Timestamp};
 
 use editor::Editor;
 
@@ -104,11 +104,12 @@ pub struct Documents {
     config_manager: ConfigManager,
     file_watcher: FsWatcher,
     /// A tx channel used to propagate plugin updates from all `Editor`s.
-    update_channel: mpsc::Sender<(ViewIdentifier, PluginUpdate, usize)>,
+    update_channel: mpsc::Sender<(ViewIdentifier, PluginUpdate, usize, Timestamp)>,
     /// A queue of closures to be executed on the next idle runloop pass.
     idle_queue: Vec<Box<IdleProc>>,
     #[allow(dead_code)]
     sync_repo: Option<SyncRepo>,
+    active_trace: Arc<atomic::AtomicUsize>,
 }
 
 #[derive(Clone)]
@@ -117,7 +118,8 @@ pub struct DocumentCtx {
     kill_ring: Arc<Mutex<Rope>>,
     rpc_peer: MainPeer,
     style_map: Arc<Mutex<ThemeStyleMap>>,
-    update_channel: mpsc::Sender<(ViewIdentifier, PluginUpdate, usize)>
+    active_trace: Arc<atomic::AtomicUsize>,
+    update_channel: mpsc::Sender<(ViewIdentifier, PluginUpdate, usize, Timestamp)>
 }
 
 /// A trait for closure types which are callable with a `Documents` instance.
@@ -271,8 +273,10 @@ impl Clone for BufferContainerRef {
 impl Documents {
     pub fn new() -> Documents {
         let buffers = BufferContainerRef::new();
+        let active_trace = Arc::new(atomic::AtomicUsize::new(0));
         let config_manager = ConfigManager::default();
-        let plugin_manager = PluginManagerRef::new(buffers.clone());
+        let plugin_manager = PluginManagerRef::new(buffers.clone(),
+                                                   active_trace.clone());
         let (update_tx, update_rx) = mpsc::channel();
 
         plugins::start_update_thread(update_rx, &plugin_manager);
@@ -288,6 +292,7 @@ impl Documents {
             update_channel: update_tx,
             idle_queue: Vec::new(),
             sync_repo: None,
+            active_trace: active_trace,
         }
     }
 
@@ -302,6 +307,7 @@ impl Documents {
             rpc_peer: peer.clone(),
             style_map: self.style_map.clone(),
             update_channel: self.update_channel.clone(),
+            active_trace: self.active_trace.clone(),
         }
     }
 
@@ -318,6 +324,11 @@ impl Documents {
     pub fn handle_notification(&mut self, cmd: rpc::CoreNotification,
                                rpc_ctx: &RpcCtx) {
         use rpc::CoreNotification::*;
+        // NOTE: there's a possible race here where a plugin update arrives between
+        // now and whenever we grab the lock; in this case our next trace will be
+        // misattributed.
+        self.active_trace.store(rpc_ctx.get_active_trace() as usize,
+                                atomic::Ordering::Relaxed);
         match cmd {
             ClientStarted { config_dir, client_extras_dir } =>
                 self.do_client_init(rpc_ctx.get_peer(), config_dir,
@@ -339,6 +350,8 @@ impl Documents {
     pub fn handle_request(&mut self, cmd: rpc::CoreRequest,
                           rpc_ctx: &RpcCtx) -> Result<Value, RemoteError> {
         use rpc::CoreRequest::*;
+        self.active_trace.store(rpc_ctx.get_active_trace() as usize,
+                                atomic::Ordering::Relaxed);
         match cmd {
             NewView { file_path } => {
                 let result = self.do_new_view(rpc_ctx.get_peer(), file_path);
@@ -607,6 +620,10 @@ impl Documents {
         }
     }
 
+    pub fn collect_traces(&self) -> Vec<Trace> {
+        self.plugins.collect_traces()
+    }
+
     /// Process file system events, forwarding them to registrees.
     fn handle_fs_events(&mut self) {
         let mut events = {
@@ -723,75 +740,83 @@ impl Drop for Documents {
 
 impl DocumentCtx {
     pub fn update_view(&self, view_id: ViewIdentifier, update: &Value) {
-        self.rpc_peer.send_rpc_notification("update",
+        let trace = self.active_trace.load(atomic::Ordering::Relaxed) as u64;
+        self.rpc_peer.send_trace_rpc_notification("update",
             &json!({
                 "view_id": view_id,
                 "update": update,
-            }));
+            }), trace);
     }
 
     pub fn scroll_to(&self, view_id: ViewIdentifier, line: usize, col: usize) {
-        self.rpc_peer.send_rpc_notification("scroll_to",
+        let trace = self.active_trace.load(atomic::Ordering::Relaxed) as u64;
+        self.rpc_peer.send_trace_rpc_notification("scroll_to",
             &json!({
                 "view_id": view_id,
                 "line": line,
                 "col": col,
-            }));
+            }), trace);
     }
 
     pub fn config_changed(&self, view_id: &ViewIdentifier, changes: &Table) {
-        self.rpc_peer.send_rpc_notification("config_changed",
+        let trace = self.active_trace.load(atomic::Ordering::Relaxed) as u64;
+        self.rpc_peer.send_trace_rpc_notification("config_changed",
                                             &json!({
                                                 "view_id": view_id,
                                                 "changes": changes,
-                                            }));
+                                            }), trace);
     }
 
     /// Notify the client that a plugin ha started.
     pub fn plugin_started(&self, view_id: ViewIdentifier, plugin: &str) {
-        self.rpc_peer.send_rpc_notification("plugin_started",
+        let trace = self.active_trace.load(atomic::Ordering::Relaxed) as u64;
+        self.rpc_peer.send_trace_rpc_notification("plugin_started",
                                             &json!({
                                                 "view_id": view_id,
                                                 "plugin": plugin,
-                                            }));
+                                            }), trace);
     }
 
     /// Notify the client that a plugin ha stopped.
     ///
     /// `code` is not currently used.
     pub fn plugin_stopped(&self, view_id: ViewIdentifier, plugin: &str, code: i32) {
-        self.rpc_peer.send_rpc_notification("plugin_stopped",
+        let trace = self.active_trace.load(atomic::Ordering::Relaxed) as u64;
+        self.rpc_peer.send_trace_rpc_notification("plugin_stopped",
                                             &json!({
                                                 "view_id": view_id,
                                                 "plugin": plugin,
                                                 "code": code,
-                                            }));
+                                            }), trace);
     }
 
     /// Notify the client of the available plugins.
     pub fn available_plugins(&self, view_id: ViewIdentifier,
                              plugins: &[ClientPluginInfo]) {
-        self.rpc_peer.send_rpc_notification("available_plugins",
+        let trace = self.active_trace.load(atomic::Ordering::Relaxed) as u64;
+        self.rpc_peer.send_trace_rpc_notification("available_plugins",
                                             &json!({
                                                 "view_id": view_id,
-                                                "plugins": plugins }));
+                                                "plugins": plugins }), trace);
     }
 
     pub fn update_cmds(&self, view_id: ViewIdentifier,
                        plugin: &str, cmds: &[Command]) {
-        self.rpc_peer.send_rpc_notification("update_cmds",
+        let trace = self.active_trace.load(atomic::Ordering::Relaxed) as u64;
+        self.rpc_peer.send_trace_rpc_notification("update_cmds",
                                             &json!({
                                                 "view_id": view_id,
                                                 "plugin": plugin,
                                                 "cmds": cmds,
-                                            }));
+                                            }), trace);
     }
 
     pub fn alert(&self, msg: &str) {
-        self.rpc_peer.send_rpc_notification("alert",
+        let trace = self.active_trace.load(atomic::Ordering::Relaxed) as u64;
+        self.rpc_peer.send_trace_rpc_notification("alert",
             &json!({
                 "msg": msg,
-            }));
+            }), trace);
     }
 
     pub fn get_kill_ring(&self) -> Rope {
@@ -825,7 +850,8 @@ impl DocumentCtx {
     /// Notify plugins of an update
     pub fn update_plugins(&self, view_id: ViewIdentifier,
                           update: PluginUpdate, undo_group: usize) {
-        self.update_channel.send((view_id, update, undo_group)).unwrap();
+        let trace = self.active_trace.load(atomic::Ordering::Relaxed) as u64;
+        self.update_channel.send((view_id, update, undo_group, trace)).unwrap();
     }
 }
 

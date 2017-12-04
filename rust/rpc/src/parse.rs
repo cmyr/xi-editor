@@ -21,7 +21,6 @@ use serde::de::DeserializeOwned;
 
 use error::{RemoteError, ReadError};
 
-
 /// A unique identifier attached to request RPCs.
 type RequestId = u64;
 
@@ -106,13 +105,18 @@ impl RpcObject {
         self.0.get("id").is_some() && self.0.get("method").is_none()
     }
 
-    pub fn get_trace(&self) -> Option<usize> {
+    pub fn get_trace(&self) -> u64 {
         self.0.get("trace").and_then(Value::as_u64)
-            .map(|v| v as usize)
+            .unwrap_or(0)
+    }
+
+    pub fn is_error(&self) -> bool {
+        self.0.get("error").is_some()
     }
 
     pub fn is_builtin(&self) -> bool {
-        self.get_method() == Some("xi-rpc.show_trace")
+        self.get_method().map(|m| m.starts_with("xi-rpc."))
+            .unwrap_or(false)
     }
 
     /// Attempts to convert the underlying `Value` into an RPC response
@@ -271,14 +275,29 @@ mod tests {
     }
 
     #[test]
-    fn get_method() {
+    fn builtin() {
         let json = json!({
             "method": "xi-rpc.show_trace",
             "params": {}
         });
 
-        let obj = RpcObject(json);
+        let mut obj = RpcObject(json, None);
         assert_eq!(obj.get_method(), Some("xi-rpc.show_trace"));
-        assert!(obj.is_builtin())
+        assert!(obj.is_builtin());
+
+        obj.0["method"] = json!("edit");
+        assert!(!obj.is_builtin());
+
+        obj.0["method"] = json!("rpc.edit");
+        assert!(!obj.is_builtin());
+
+        obj.0["method"] = json!("xi-rpc-edit");
+        assert!(!obj.is_builtin());
+
+        obj.0["method"] = json!("xi-rpc-edit");
+        assert!(!obj.is_builtin());
+
+        obj.0["method"] = json!("xi-rpc.edit");
+        assert!(obj.is_builtin());
     }
 }

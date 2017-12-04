@@ -1,11 +1,5 @@
-use std::time::Duration;
-use std::collections::{BTreeSet, BTreeMap};
-//use std::sync::atomic::{AtomicUsize, Ordering};
 use std::borrow::Cow;
-//use std::mem;
 use std::fmt;
-use std::cmp::Ordering;
-use std::ops::{Add, Sub};
 
 use libc;
 
@@ -14,123 +8,77 @@ pub type CowStr = Cow<'static, str>;
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub struct SysTime(u64);
 
-impl SysTime {
+/// System clock time, in nanoseconds.
+///
+/// Note: We would prefer to use `time::Instant`, but it can't be serialized.
+/// Generation of this type is platform dependent, and may not work on all
+/// platforms. Implementations are taken from `time::Instant` in the stdlib.
+///
+/// It is important that timestamps are generated equivelantly (through the
+/// same system calls) in all processes participating in tracing.
+pub type Timestamp = u64;
 
-    #[cfg(any(target_os = "macos", target_os = "ios"))]
-    pub fn now() -> Self {
-        let t = unsafe { libc::mach_absolute_time() };
-        SysTime(t as u64)
-    }
-
-    #[cfg(target_os = "unix")]
-    pub fn now() -> Self {
-
-        let mut t = libc::timespec {
-            tv_sec: 0,
-            tv_nsec: 0,
-        };
-
-       let success = unsafe { libc::clock_gettime(clock, &mut t) };
-       if success < 0 {
-           eprintln!("xi-core failed to get system time.");
-       }
-       SysTime(t.tv_sec * 1_000_000_000 + t.tv_nsec)
-    }
+#[cfg(any(target_os = "macos", target_os = "ios"))]
+pub fn timestamp_now() -> Timestamp {
+    unsafe { libc::mach_absolute_time() }
 }
 
-impl PartialEq for SysTime {
-    fn eq(&self, other: &SysTime) -> bool {
-        self.0 == other.0
-    }
+#[cfg(target_os = "unix")]
+pub fn timestamp_now() -> Timestamp {
+
+    let mut t = libc::timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
+
+    let success = unsafe { libc::clock_gettime(clock, &mut t) };
+    if success < 0 { panic!("timestamp_now() failed.") }
+    t.tv_sec * 1_000_000_000 + t.tv_nsec
 }
 
-impl Eq for SysTime {}
-
-impl PartialOrd for SysTime {
-    fn partial_cmp(&self, other: &SysTime) -> Option<Ordering> {
-        Some(self.cmp(&other))
-    }
+#[cfg(not(any(target_os = "macos", target_os = "ios", target_os = "unix")))]
+pub fn timestamp_now() -> Timestamp {
+    panic!("Tracing is not supported on your platform");
 }
 
-impl Ord for SysTime {
-    fn cmp(&self, other: &SysTime) -> Ordering {
-        self.0.cmp(&other.0)
-    }
-}
 
-impl Add for SysTime {
-    type Output = SysTime;
+pub fn merge_traces(mut traces: Vec<Vec<Trace>>) {
+    let mut all = traces.iter_mut()
+        .fold(Vec::new(), |mut all, mut t| { all.append(&mut t); all } );
+    all.sort_by_key(|t| t.timestamp);
 
-    fn add(self, rhs: SysTime) -> SysTime {
-        SysTime(self.0 + rhs.0)
-    }
-}
+    let mut base_t = all.first().as_ref().map(|t| t.timestamp).unwrap_or(0);
 
-impl Sub for SysTime {
-    type Output = SysTime;
-
-    fn sub(self, rhs: SysTime) -> SysTime {
-        SysTime(self.0 - rhs.0)
-    }
-}
-
-pub fn merge_traces(traces: &mut [BTreeMap<usize, Trace>]) {
-    let all_ids = traces.iter()
-        .flat_map(|t| t.keys().cloned())
-        .collect::<BTreeSet<_>>();
-
-    for id in all_ids.iter() {
-        let trace_groups = traces.iter_mut()
-            .flat_map(|t| t.remove(id))
-            .collect::<Vec<_>>();
-
-        let min_t = trace_groups.iter()
-            .map(|g| g.start)
-            .min()
-            .unwrap();
-
-        let mut out = Vec::new();
-        for group in trace_groups {
-            let glabel = group.label.clone().unwrap_or("".to_owned());
-            for event in group.events {
-                let d = PrettyDuration::from_nanos(event.time.0 - min_t.0);
-                let s = format!("{:>5} {}.{}.{}", d, group.src_name, glabel, event.label);
-                out.push((event.time, s));
-            }
+    for trace in all {
+        if trace.is_orphan() {
+            base_t = trace.timestamp;
+            eprintln!("\n### new tree ###");
         }
-
-        out.sort();
-
-        let ready_to_print: Vec<String> = out.drain(..)
-            .map(|(_, s)| s).collect();
-
-        eprintln!("##### trace {} #####\n{}", id, ready_to_print.join("\n"));
-
+        let d = PrettyDuration::from_nanos(trace.timestamp - base_t);
+        eprintln!("{:>5} {}.{}", d, trace.proc_name, trace.label);
     }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Trace {
-    pub trace_id: usize,
-    pub src_name: String,
-    pub label: Option<String>,
-    // ns since unix epoch
-    pub start: SysTime,
-    pub events: Vec<Event>,
+    pub timestamp: Timestamp,
+    pub proc_name: CowStr,
+    pub label: CowStr,
+    pub parent: Option<Timestamp>,
 }
 
 impl Trace {
-    pub fn new(trace_id: usize, src_name: String) -> Self {
-        let start = SysTime::now();
-        let events = vec![Event { label: "received".into(), time: start }];
-        let label = None;
-        Trace { trace_id, src_name, label, start, events }
+    pub fn new(label: CowStr, parent: Option<Timestamp>,
+               timestamp: Option<Timestamp>) -> Self
+    {
+        let timestamp = timestamp.unwrap_or(timestamp_now());
+        // we can update the proc_name when we process traces
+        let proc_name = "xi-rpc".into();
+        Trace { timestamp, proc_name, label, parent }
     }
 
-    pub fn add_event<S: Into<CowStr>>(&mut self, label: S) {
-        let label = label.into();
-        let time = SysTime::now();
-        self.events.push( Event { label, time } );
+    fn is_orphan(&self) -> bool {
+        self.parent.is_none() || self.parent == Some(0)
     }
 }
 
@@ -138,10 +86,6 @@ impl Trace {
 pub struct Event {
     label: CowStr,
     time: SysTime,
-}
-
-fn nanos_from_duration(d: &Duration) -> u64 {
-    d.as_secs() * 1_000_000_000 + d.subsec_nanos() as u64
 }
 
 struct PrettyDuration {
@@ -152,11 +96,6 @@ struct PrettyDuration {
 }
 
 impl PrettyDuration {
-    pub fn new(d: &Duration) -> Self {
-        let d = nanos_from_duration(d);
-        Self::from_nanos(d)
-    }
-
     pub fn from_nanos(d: u64) -> Self {
         let secs = d / 1_000_000_000;
         let d = d - secs * 1_000_000_000;

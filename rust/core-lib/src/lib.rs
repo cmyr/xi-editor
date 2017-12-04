@@ -94,7 +94,7 @@ extern crate xi_rope;
 extern crate xi_unicode;
 extern crate xi_rpc;
 
-use xi_rpc::{RpcPeer, RpcCtx, Handler, RemoteError};
+use xi_rpc::{RpcPeer, RpcCtx, Handler, RemoteError, Trace, CowStr};
 
 pub type MainPeer = RpcPeer;
 
@@ -140,7 +140,11 @@ impl Handler for MainState {
         self.tabs.handle_idle(token);
     }
 
-    fn trace_name(&self) -> &'static str {
-        "xi-core"
+    fn trace_name(&self) -> CowStr {
+        "xi-core".into()
+    }
+
+    fn collect_traces(&self) -> Vec<Trace> {
+        self.tabs.collect_traces()
     }
 }

@@ -21,7 +21,7 @@ use std::path::PathBuf;
 use serde_json::{self, Value};
 
 use xi_rpc;
-use xi_rpc::{RpcLoop, RpcCtx, RpcCall, RemoteError, ReadError, dict_get_u64, dict_get_string};
+use xi_rpc::{RpcLoop, RpcCtx, RpcCall, RemoteError, ReadError, CowStr, dict_get_u64, dict_get_string};
 
 #[derive(Debug)]
 pub enum Error {
@@ -267,8 +267,8 @@ impl<'a, H: Handler> xi_rpc::Handler for MyHandler<'a, H> {
         self.0.idle(PluginCtx(ctx), token);
     }
 
-    fn trace_name(&self) -> &'static str {
-        "xi-plugin"
+    fn trace_name(&self) -> CowStr {
+        "xi-plugin".into()
     }
 }
 

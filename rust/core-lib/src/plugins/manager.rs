@@ -17,13 +17,15 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::io;
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex, Weak, MutexGuard};
+use std::sync::{Arc, Mutex, Weak, MutexGuard, atomic};
 
 use std::path::Path;
 use std::fmt::Debug;
 
 use serde::Serialize;
 use serde_json::{self, Value};
+
+use xi_rpc::{Trace, Timestamp};
 
 use tabs::{BufferIdentifier, ViewIdentifier, BufferContainerRef};
 
@@ -42,6 +44,7 @@ pub struct PluginManager {
     global_plugins: PluginGroup,
     buffers: BufferContainerRef,
     next_id: usize,
+    active_trace: Arc<atomic::AtomicUsize>,
 }
 
 #[derive(Debug)]
@@ -71,8 +74,10 @@ impl PluginManager {
     }
 
     /// Handle a request from a plugin.
-    pub fn handle_plugin_notification(&self, cmd: PluginNotification, plugin_id: PluginPid) {
+    pub fn handle_plugin_notification(&self, cmd: PluginNotification,
+                                      plugin_id: PluginPid, trace: Timestamp) {
         use self::PluginNotification::*;
+        self.active_trace.store(trace as usize, atomic::Ordering::Relaxed);
         match cmd {
             //TODO: these should not be unwraps
             AddScopes { view_id, scopes } => {
@@ -95,8 +100,10 @@ impl PluginManager {
     }
 
     /// Handle a request from a plugin.
-    pub fn handle_plugin_request(&self, cmd: PluginRequest, _: PluginPid) -> Value {
+    pub fn handle_plugin_request(&self, cmd: PluginRequest, _: PluginPid,
+                                 trace: Timestamp) -> Value {
         use self::PluginRequest::*;
+        self.active_trace.store(trace as usize, atomic::Ordering::Relaxed);
         match cmd {
             //TODO: these should not be unwraps
             LineCount { view_id } => {
@@ -118,7 +125,9 @@ impl PluginManager {
 
     /// Passes an update from a buffer to all registered plugins.
     fn update_plugins(&mut self, view_id: ViewIdentifier,
-                  update: PluginUpdate, undo_group: usize) -> Result<(), Error> {
+                      update: PluginUpdate, undo_group: usize, trace: Timestamp)
+                      -> Result<(), Error>
+    {
 
         // find all running plugins for this buffer, and send them the update
         let mut dead_plugins = Vec::new();
@@ -138,7 +147,7 @@ impl PluginManager {
                 let buffers = self.buffers.clone().to_weak();
                 let mut plugin_ref = plugin.clone();
 
-                plugin.update(&update, move |response| {
+                plugin.update(&update, trace, move |response| {
                     let buffers = match buffers.upgrade() {
                         Some(b) => b,
                         None => return,
@@ -204,6 +213,21 @@ impl PluginManager {
         }
     }
 
+    fn collect_traces(&self) -> Vec<Trace> {
+        let all_plugins: Vec<PluginRef> = self.global_plugins.values()
+            .cloned()
+            .chain(self.buffer_plugins.values().flat_map(|bp| bp.values().cloned()))
+            .collect();
+
+        let mut results = Vec::new();
+        for plugin in all_plugins {
+            let mut traces = plugin.collect_traces();
+            results.append(&mut traces);
+        }
+
+        results
+    }
+
     /// Launches and initializes the named plugin.
     fn start_plugin(&mut self,
                     self_ref: &PluginManagerRef,
@@ -235,11 +259,12 @@ impl PluginManager {
 
         let me = self_ref.clone();
         let plugin_name = plugin_name.to_owned();
+        let trace = self.active_trace.load(atomic::Ordering::Relaxed) as Timestamp;
 
         start_plugin_process(self_ref, &plugin_desc, plugin_id, move |result| {
             match result {
                 Ok(plugin_ref) => {
-                    plugin_ref.initialize(&init_info);
+                    plugin_ref.initialize(&init_info, trace);
                     if is_global {
                         me.lock().on_plugin_connect_global(&plugin_name, plugin_ref,
                                                            commands);
@@ -413,7 +438,8 @@ impl WeakPluginManagerRef {
 }
 
 impl PluginManagerRef {
-    pub fn new(buffers: BufferContainerRef) -> Self {
+    pub fn new(buffers: BufferContainerRef,
+               trace_ref: Arc<atomic::AtomicUsize>) -> Self {
         PluginManagerRef(Arc::new(Mutex::new(
             PluginManager {
                 // TODO: actually parse these from manifest files
@@ -422,6 +448,7 @@ impl PluginManagerRef {
                 global_plugins: PluginGroup::new(),
                 buffers: buffers,
                 next_id: 0,
+                active_trace: trace_ref,
             }
         )))
     }
@@ -531,15 +558,20 @@ impl PluginManagerRef {
     }
 
     /// Forward an update from a view to registered plugins.
-    pub fn update_plugins(&self, view_id: ViewIdentifier,
-                          update: PluginUpdate, undo_group: usize) -> Result<(), Error> {
-        self.lock().update_plugins(view_id, update, undo_group)
+    pub fn update_plugins(&self, view_id: ViewIdentifier, update: PluginUpdate,
+                          undo_group: usize, trace: Timestamp)
+                          -> Result<(), Error> {
+        self.lock().update_plugins(view_id, update, undo_group, trace)
     }
 
     /// Sends a custom notification to a running plugin
     pub fn dispatch_command(&self, view_id: ViewIdentifier, receiver: &str,
-                             method: &str, params: &Value) {
+                            method: &str, params: &Value) {
         self.lock().dispatch_command(view_id, receiver, method, params);
+    }
+
+    pub fn collect_traces(&self) -> Vec<Trace> {
+        self.lock().collect_traces()
     }
 
     // ====================================================================

@@ -27,7 +27,7 @@ use std::io::{self, BufReader};
 
 use serde_json::{self, Value};
 
-use xi_rpc::{self, RpcPeer, RpcCtx, RpcLoop, Handler, RemoteError};
+use xi_rpc::{self, RpcPeer, RpcCtx, RpcLoop, Handler, RemoteError, Trace, Timestamp, CowStr};
 use tabs::ViewIdentifier;
 
 pub use self::manager::{PluginManagerRef, WeakPluginManagerRef};
@@ -74,24 +74,24 @@ impl Clone for PluginRef {
 impl Handler for PluginRef {
     type Notification = PluginNotification;
     type Request = PluginRequest;
-    fn handle_notification(&mut self, _ctx: &RpcCtx, rpc: Self::Notification) {
+    fn handle_notification(&mut self, ctx: &RpcCtx, rpc: Self::Notification) {
         let plugin_manager = {
             self.0.lock().unwrap().manager.upgrade()
         };
         if let Some(plugin_manager) = plugin_manager {
             let pid = self.get_identifier();
-            plugin_manager.lock().handle_plugin_notification(rpc, pid)
+            plugin_manager.lock().handle_plugin_notification(rpc, pid, ctx.get_active_trace())
         }
     }
 
-    fn handle_request(&mut self, _ctx: &RpcCtx, rpc: Self::Request) ->
+    fn handle_request(&mut self, ctx: &RpcCtx, rpc: Self::Request) ->
         Result<Value, RemoteError> {
         let plugin_manager = {
             self.0.lock().unwrap().manager.upgrade()
         };
         if let Some(plugin_manager) = plugin_manager {
             let pid = self.get_identifier();
-            Ok(plugin_manager.lock().handle_plugin_request(rpc, pid))
+            Ok(plugin_manager.lock().handle_plugin_request(rpc, pid, ctx.get_active_trace()))
         } else {
             Err(RemoteError::custom(88, "Plugin manager missing", None))
         }
@@ -106,25 +106,44 @@ impl PluginRef {
     }
 
     /// Initialize the plugin.
-    pub fn initialize(&self, init: &[PluginBufferInfo]) {
+    pub fn initialize(&self, init: &[PluginBufferInfo], trace: Timestamp) {
         self.0.lock().unwrap().peer
-            .send_rpc_notification("initialize", &json!({
+            .send_trace_rpc_notification("initialize", &json!({
                 "buffer_info": init,
-            }));
+            }), trace);
     }
 
     /// Update message sent to the plugin.
-    pub fn update<F>(&self, update: &PluginUpdate, callback: F)
+    pub fn update<F>(&self, update: &PluginUpdate, trace: Timestamp, callback: F)
             where F: FnOnce(Result<Value, xi_rpc::Error>) + Send + 'static {
         let params = serde_json::to_value(update).expect("PluginUpdate invalid");
         match self.0.lock() {
-            Ok(plugin) => plugin.peer.send_rpc_request_async("update", &params,
-                                                             Box::new(callback)),
+            Ok(plugin) =>
+                plugin.peer.send_trace_rpc_request_async("update", &params,
+                                                         Box::new(callback),
+                                                         trace),
             Err(err) => {
                 eprintln!("plugin update failed {:?}", err);
                 callback(Err(xi_rpc::Error::PeerDisconnect));
             }
         }
+    }
+
+    pub fn collect_traces(&self) -> Vec<Trace> {
+        let plug_name = self.get_name();
+        let host_name: CowStr = format!("xi-host.{}", &plug_name).into();
+        let mut traces = self.0.lock().unwrap().peer.collect_traces();
+        traces.iter_mut().for_each(|t| t.proc_name = host_name.clone().into());
+        let remote_traces = self.0.lock().unwrap().peer.send_rpc_request(
+            "xi-rpc.collect_traces",
+            &json!({}))
+            .unwrap();
+
+        let mut remote_traces: Vec<Trace> = serde_json::from_value(remote_traces).unwrap();
+
+        remote_traces.iter_mut().for_each(|t| t.proc_name = plug_name.clone().into());
+        traces.append(&mut remote_traces);
+        traces
     }
 
     /// Termination message sent to the plugin.
@@ -161,6 +180,11 @@ impl PluginRef {
     pub fn get_identifier(&self) -> PluginPid {
         self.0.lock().unwrap().identifier
     }
+
+    /// Returns the plugin's name
+    pub fn get_name(&self) -> String {
+        self.0.lock().unwrap().description.name.clone()
+    }
 }
 
 
@@ -177,16 +201,16 @@ impl PluginRef {
 /// they are sent over this channel to a receiver running in another thread,
 /// which forwards them to interested plugins.
 pub fn start_update_thread(
-    rx: mpsc::Receiver<(ViewIdentifier, PluginUpdate, usize)>,
+    rx: mpsc::Receiver<(ViewIdentifier, PluginUpdate, usize, Timestamp)>,
     manager_ref: &PluginManagerRef)
 {
     let manager_ref = manager_ref.clone();
     thread::spawn(move ||{
         loop {
             match rx.recv() {
-                Ok((view_id, update, undo_group)) => {
+                Ok((view_id, update, undo_group, timestamp)) => {
                     if let Some(err) = manager_ref.update_plugins(
-                        view_id, update, undo_group).err() {
+                        view_id, update, undo_group, timestamp).err() {
                         eprintln!("error updating plugins {:?}", err);
                     }
                 }
