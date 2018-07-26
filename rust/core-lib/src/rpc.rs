@@ -434,6 +434,7 @@ pub enum EditNotification {
     DebugWrapWidth,
     /// Prints the style spans present in the active selection.
     DebugPrintSpans,
+    DebugShowCompletions,
     CancelOperation,
     Uppercase,
     Lowercase,
