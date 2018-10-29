@@ -373,13 +373,33 @@ impl<N: NodeInfo> Node<N> {
         T: Into<Node<N>>,
         IV: IntervalBounds,
     {
-        let mut b = TreeBuilder::new();
         let iv = iv.into_interval(self.len());
+        let new = new.into();
+
+        let new = match self.try_edit_in_place(iv, new) {
+            Ok(_) => return,
+            Err(node) => node,
+        };
+
+        let mut b = TreeBuilder::new();
         let self_iv = self.interval();
         self.push_subseq(&mut b, self_iv.prefix(iv));
-        b.push(new.into());
+        b.push(new);
         self.push_subseq(&mut b, self_iv.suffix(iv));
         *self = b.build();
+    }
+
+    /// Try to edit by modifying an existing leaf. Returns the input node
+    /// on failure, so that it can be reused.
+    fn try_edit_in_place(&mut self, iv: Interval, new: Node<N>) -> Result<(), Node<N>> {
+        const MAX_INSERT_LEN: usize = 10; // idk man
+        if !new.is_leaf() || new.len().saturating_sub(iv.size()) > MAX_INSERT_LEN {
+            return Err(new);
+        }
+        let mut cursor = Cursor::new(self, iv.start);
+        if let Some(())
+
+        Err(new)
     }
 
     // doesn't deal with endpoint, handle that specially if you need it
@@ -518,6 +538,10 @@ impl<'a, N: NodeInfo> Cursor<'a, N> {
     /// invariant: offset is at end of leaf iff end of rope
     pub fn get_leaf(&self) -> Option<(&'a N::L, usize)> {
         self.leaf.map(|l| (l, self.position - self.offset_of_leaf))
+    }
+
+    fn get_leaf_mut(&mut self) -> Option<(&'a N::L, usize)> {
+        None
     }
 
     pub fn set(&mut self, position: usize) {
