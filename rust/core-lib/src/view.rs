@@ -111,7 +111,7 @@ pub struct Replace {
 }
 
 /// A size, in pixel units (not display pixels).
-#[derive(Debug, Default, PartialEq, Serialize, Deserialize, Clone)]
+#[derive(Debug, Default, PartialEq, Serialize, Deserialize, Clone, Copy)]
 pub struct Size {
     pub width: f64,
     pub height: f64,
@@ -276,6 +276,10 @@ impl View {
     fn goto_line(&mut self, text: &Rope, line: u64) {
         let offset = self.line_col_to_offset(text, line as usize, 0);
         self.set_selection(text, SelRegion::caret(offset));
+    }
+
+    pub fn get_size(&self) -> Size {
+        self.size
     }
 
     pub fn set_size(&mut self, size: Size) {

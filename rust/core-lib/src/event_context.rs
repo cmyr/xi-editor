@@ -148,8 +148,12 @@ impl<'a> EventContext<'a> {
     fn do_special(&mut self, cmd: SpecialEvent) {
         match cmd {
             SpecialEvent::Resize(size) => {
-                self.with_view(|view, _| view.set_size(size));
-                if self.config.word_wrap {
+                let width_changed = self.with_view(|view, _| {
+                    let old_size = view.get_size();
+                    view.set_size(size);
+                    old_size.width != size.width
+                });
+                if width_changed && self.config.word_wrap {
                     self.update_wrap_settings(false);
                 }
             }
