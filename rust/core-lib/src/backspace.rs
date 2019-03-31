@@ -17,12 +17,12 @@ use xi_rope::{Cursor, Rope};
 
 use crate::config::BufferItems;
 use crate::selection::SelRegion;
-use crate::view::View;
+use crate::view::ViewMovement;
 use xi_unicode::*;
 
 #[allow(clippy::cyclomatic_complexity)]
-pub fn offset_for_delete_backwards(
-    view: &View,
+pub fn offset_for_delete_backwards<V: ViewMovement>(
+    view: &V,
     region: &SelRegion,
     text: &Rope,
     config: &BufferItems,

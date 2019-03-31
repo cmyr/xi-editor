@@ -20,7 +20,7 @@ use std::ops::Deref;
 
 use crate::annotations::{AnnotationSlice, AnnotationType, ToAnnotation};
 use crate::index_set::remove_n_at;
-use crate::view::View;
+use crate::view::{View, ViewMovement};
 use xi_rope::{Interval, Rope, RopeDelta, Transformer};
 
 /// A type representing horizontal measurements. This is currently in units
@@ -69,6 +69,10 @@ impl Selection {
     pub fn collapse(&mut self) {
         self.regions.truncate(1);
         self.regions[0].start = self.regions[0].end;
+    }
+
+    pub fn interval(&self) -> Interval {
+        Interval::new(self.regions[0].min(), self.regions.last().unwrap().max())
     }
 
     // The smallest index so that offset > region.max() for all preceding

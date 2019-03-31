@@ -17,7 +17,7 @@
 use std::cmp::max;
 
 use crate::selection::{HorizPos, SelRegion, Selection};
-use crate::view::View;
+use crate::view::{View, ViewMovement};
 use crate::word_boundaries::WordCursor;
 use xi_rope::{Cursor, LinesMetric, Rope};
 
@@ -64,9 +64,9 @@ pub enum Movement {
 ///
 /// Note: in non-exceptional cases, this function preserves the `horiz`
 /// field of the selection region.
-fn vertical_motion(
+fn vertical_motion<V: ViewMovement>(
     r: SelRegion,
-    view: &View,
+    view: &V,
     text: &Rope,
     line_delta: isize,
     modify: bool,
@@ -93,9 +93,9 @@ fn vertical_motion(
 
 /// Compute movement based on vertical motion by the given number of lines skipping
 /// any line that is shorter than the current cursor position.
-fn vertical_motion_exact_pos(
+fn vertical_motion_exact_pos<V: ViewMovement>(
     r: SelRegion,
-    view: &View,
+    view: &V,
     text: &Rope,
     move_up: bool,
     modify: bool,
@@ -136,9 +136,9 @@ fn vertical_motion_exact_pos(
 
 /// Based on the current selection position this will return the cursor position, the current line, and the
 /// total number of lines of the file.
-fn selection_position(
+fn selection_position<V: ViewMovement>(
     r: SelRegion,
-    view: &View,
+    view: &V,
     text: &Rope,
     move_up: bool,
     modify: bool,
@@ -168,10 +168,10 @@ fn scroll_height(view: &View) -> isize {
 }
 
 /// Compute the result of movement on one selection region.
-pub fn region_movement(
+pub fn region_movement<V: ViewMovement>(
     m: Movement,
     r: SelRegion,
-    view: &View,
+    view: &V,
     text: &Rope,
     modify: bool,
 ) -> SelRegion {
@@ -270,8 +270,8 @@ pub fn region_movement(
             }
             (offset, None)
         }
-        Movement::UpPage => vertical_motion(r, view, text, -scroll_height(view), modify),
-        Movement::DownPage => vertical_motion(r, view, text, scroll_height(view), modify),
+        Movement::UpPage => vertical_motion(r, view, text, -20, modify),
+        Movement::DownPage => vertical_motion(r, view, text, 20, modify),
         Movement::StartOfDocument => (0, None),
         Movement::EndOfDocument => (text.len(), None),
     };
@@ -285,10 +285,10 @@ pub fn region_movement(
 ///
 /// If `modify` is `true`, the selections are modified, otherwise the results
 /// of individual region movements become carets.
-pub fn selection_movement(
+pub fn selection_movement<V: ViewMovement>(
     m: Movement,
     s: &Selection,
-    view: &View,
+    view: &V,
     text: &Rope,
     modify: bool,
 ) -> Selection {

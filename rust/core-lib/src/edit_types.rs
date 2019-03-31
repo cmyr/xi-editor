@@ -27,7 +27,7 @@ use crate::view::Size;
 
 /// Events that only modify view state
 #[derive(Debug, PartialEq, Clone)]
-pub(crate) enum ViewEvent {
+pub enum ViewEvent {
     Move(Movement),
     ModifySelection(Movement),
     SelectAll,
@@ -53,7 +53,7 @@ pub(crate) enum ViewEvent {
 
 /// Events that modify the buffer
 #[derive(Debug, PartialEq, Clone)]
-pub(crate) enum BufferEvent {
+pub enum BufferEvent {
     Delete { movement: Movement, kill: bool },
     Backspace,
     Transpose,
@@ -78,7 +78,7 @@ pub(crate) enum BufferEvent {
 
 /// An event that needs special handling
 #[derive(Debug, PartialEq, Clone)]
-pub(crate) enum SpecialEvent {
+pub enum SpecialEvent {
     DebugRewrap,
     DebugWrapWidth,
     DebugPrintSpans,
@@ -93,7 +93,7 @@ pub(crate) enum SpecialEvent {
 }
 
 #[derive(Debug, PartialEq, Clone)]
-pub(crate) enum EventDomain {
+pub enum EventDomain {
     View(ViewEvent),
     Buffer(BufferEvent),
     Special(SpecialEvent),

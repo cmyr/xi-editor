@@ -29,18 +29,17 @@ use crate::config::BufferItems;
 use crate::edit_types::BufferEvent;
 use crate::event_context::MAX_SIZE_LIMIT;
 use crate::layers::Layers;
-use crate::movement::{region_movement, Movement};
+use crate::movement::Movement;
 use crate::plugins::rpc::{GetDataResponse, PluginEdit, ScopeSpan, TextUnit};
 use crate::plugins::PluginId;
 use crate::rpc::SelectionModifier;
 use crate::selection::{InsertDrift, SelRegion, Selection};
 use crate::styles::ThemeStyleMap;
-use crate::view::{Replace, View};
+use crate::view::{Replace, View, ViewMovement};
 use crate::word_boundaries::WordCursor;
 
 #[cfg(not(feature = "ledger"))]
 pub struct SyncStore;
-use crate::backspace::offset_for_delete_backwards;
 #[cfg(feature = "ledger")]
 use fuchsia::sync::SyncStore;
 
@@ -124,7 +123,7 @@ impl Editor {
         }
     }
 
-    pub(crate) fn get_buffer(&self) -> &Rope {
+    pub fn get_buffer(&self) -> &Rope {
         &self.text
     }
 
@@ -192,13 +191,8 @@ impl Editor {
     }
 
     fn insert<T: Into<Rope>>(&mut self, view: &View, text: T) {
-        let rope = text.into();
-        let mut builder = DeltaBuilder::new(self.text.len());
-        for region in view.sel_regions() {
-            let iv = Interval::new(region.min(), region.max());
-            builder.replace(iv, rope.clone());
-        }
-        self.add_delta(builder.build());
+        let delta = edit_ops::insert(&self.text, view.sel_regions(), text);
+        self.add_delta(delta);
     }
 
     /// Leaves the current selection untouched, but surrounds it with two insertions.
@@ -371,20 +365,9 @@ impl Editor {
     }
 
     fn delete_backward(&mut self, view: &View, config: &BufferItems) {
-        // TODO: this function is workable but probably overall code complexity
-        // could be improved by implementing a "backspace" movement instead.
-        let mut builder = DeltaBuilder::new(self.text.len());
-        for region in view.sel_regions() {
-            let start = offset_for_delete_backwards(&view, &region, &self.text, &config);
-            let iv = Interval::new(start, region.max());
-            if !iv.is_empty() {
-                builder.delete(iv);
-            }
-        }
-
-        if !builder.is_empty() {
+        if let Some(delta) = edit_ops::delete_backward(&self.text, view, view.sel_regions(), config) {
             self.this_edit_type = EditType::Delete;
-            self.add_delta(builder.build());
+            self.add_delta(delta);
         }
     }
 
@@ -401,23 +384,10 @@ impl Editor {
         save: bool,
         kill_ring: &mut Rope,
     ) {
-        // We compute deletions as a selection because the merge logic
-        // is convenient. Another possibility would be to make the delta
-        // builder able to handle overlapping deletions (with union semantics).
-        let mut deletions = Selection::new();
-        for &r in view.sel_regions() {
-            if r.is_caret() {
-                let new_region = region_movement(movement, r, view, &self.text, true);
-                deletions.add_region(new_region);
-            } else {
-                deletions.add_region(r);
-            }
+        if let Some(delta) = edit_ops::delete_by_movement(&self.text, view, view.sel_regions(), movement, save, kill_ring) {
+            self.this_edit_type = EditType::Delete;
+            self.add_delta(delta);
         }
-        if save {
-            let saved = self.extract_sel_regions(&deletions).unwrap_or_default();
-            *kill_ring = Rope::from(saved);
-        }
-        self.delete_sel_regions(&deletions);
     }
 
     /// Deletes the given regions.
@@ -824,7 +794,7 @@ impl Editor {
         self.add_delta(builder.build());
     }
 
-    pub(crate) fn do_edit(
+    pub fn do_edit(
         &mut self,
         view: &mut View,
         kill_ring: &mut Rope,
@@ -992,6 +962,114 @@ fn count_lines(s: &str) -> usize {
         newlines -= 1;
     }
     1 + newlines
+}
+
+pub mod edit_ops {
+    use std::borrow::Cow;
+
+    use xi_rope::{DeltaBuilder, Interval, Rope, RopeDelta};
+    use crate::view::ViewMovement;
+    use crate::selection::{Selection, SelRegion};
+    use crate::backspace::offset_for_delete_backwards;
+    use crate::movement::{Movement, region_movement};
+    use crate::config::BufferItems;
+
+    pub fn delete_backward<V: ViewMovement>(text: &Rope, view: &V, regions: &[SelRegion], config: &BufferItems) -> Option<RopeDelta> {
+        // TODO: this function is workable but probably overall code complexity
+        // could be improved by implementing a "backspace" movement instead.
+        let mut builder = DeltaBuilder::new(text.len());
+        for region in regions {
+            let start = offset_for_delete_backwards(view, &region, text, &config);
+            let iv = Interval::new(start, region.max());
+            if !iv.is_empty() {
+                builder.delete(iv);
+            }
+        }
+        if !builder.is_empty() {
+            Some(builder.build())
+        } else {
+            None
+        }
+    }
+
+    /// Common logic for a number of delete methods. For each region in the
+    /// selection, if the selection is a caret, delete the region between
+    /// the caret and the movement applied to the caret, otherwise delete
+    /// the region.
+    ///
+    /// If `save` is set, save the deleted text into the kill ring.
+    pub fn delete_by_movement<V: ViewMovement>(
+        text: &Rope,
+        view: &V,
+        regions: &[SelRegion],
+        movement: Movement,
+        save: bool,
+        kill_ring: &mut Rope,
+    ) -> Option<RopeDelta> {
+        // We compute deletions as a selection because the merge logic
+        // is convenient. Another possibility would be to make the delta
+        // builder able to handle overlapping deletions (with union semantics).
+        let mut deletions = Selection::new();
+        for &r in regions {
+            if r.is_caret() {
+                let new_region = region_movement(movement, r, view, text, true);
+                deletions.add_region(new_region);
+            } else {
+                deletions.add_region(r);
+            }
+        }
+        if save {
+            let saved = extract_sel_regions(text, &deletions).unwrap_or_default();
+            *kill_ring = Rope::from(saved);
+        }
+        delete_sel_regions(text, &deletions)
+    }
+
+    pub fn insert<T: Into<Rope>>(text: &Rope, regions: &[SelRegion], insert: T) -> RopeDelta {
+        let rope = insert.into();
+        let mut builder = DeltaBuilder::new(text.len());
+        for region in regions {
+            let iv = Interval::new(region.min(), region.max());
+            builder.replace(iv, rope.clone());
+        }
+        builder.build()
+    }
+
+    /// Extracts non-caret selection regions into a string,
+    /// joining multiple regions with newlines.
+    fn extract_sel_regions<'a>(text: &'a Rope, sel_regions: &[SelRegion]) -> Option<Cow<'a, str>> {
+        let mut saved = None;
+        for region in sel_regions {
+            if !region.is_caret() {
+                let val = text.slice_to_cow(region);
+                match saved {
+                    None => saved = Some(val),
+                    Some(ref mut s) => {
+                        s.to_mut().push('\n');
+                        s.to_mut().push_str(&val);
+                    }
+                }
+            }
+        }
+        saved
+    }
+
+    /// Deletes the given regions.
+    fn delete_sel_regions(text: &Rope, regions: &[SelRegion]) -> Option<RopeDelta> {
+        let mut builder = DeltaBuilder::new(text.len());
+        for region in regions {
+            let iv = Interval::new(region.min(), region.max());
+            if !iv.is_empty() {
+                builder.delete(iv);
+            }
+        }
+        if !builder.is_empty() {
+            Some(builder.build())
+        } else {
+            None
+        }
+    }
+
 }
 
 #[cfg(test)]

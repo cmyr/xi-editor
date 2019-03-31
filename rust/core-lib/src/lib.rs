@@ -105,6 +105,7 @@ use apps_ledger_services_public::Ledger_Proxy;
 pub use crate::config::{BufferItems as BufferConfig, Table as ConfigTable};
 pub use crate::core::{WeakXiCore, XiCore};
 pub use crate::editor::EditType;
+pub use crate::editor::edit_ops;
 pub use crate::plugins::manifest as plugin_manifest;
 pub use crate::plugins::rpc as plugin_rpc;
 pub use crate::plugins::PluginPid;

@@ -45,6 +45,73 @@ const FLAG_SELECT: u64 = 2;
 /// Size of batches as number of bytes used during incremental find.
 const FIND_BATCH_SIZE: usize = 500000;
 
+
+    // How should we count "column"? Valid choices include:
+    // * Unicode codepoints
+    // * grapheme clusters
+    // * Unicode width (so CJK counts as 2)
+    // * Actual measurement in text layout
+    // * Code units in some encoding
+    //
+    // Of course, all these are identical for ASCII. For now we use UTF-8 code units
+    // for simplicity.
+/// A trait for conversions that may depend on the presence of linebreaks.
+/// This lets us use different sources of this information depending on
+/// whether or not breaks are present.
+///
+/// Note: the existence of this trait is mostly a convenience to not break
+/// existing API.
+pub trait ViewMovement {
+    fn offset_of_line(&self, text: &Rope, line: usize) -> usize {
+        text.offset_of_line(line)
+    }
+
+    fn line_of_offset(&self, text: &Rope, offset: usize) -> usize {
+        text.line_of_offset(offset)
+    }
+
+    fn offset_to_line_col(&self, text: &Rope, offset: usize) -> (usize, usize) {
+        let line = self.line_of_offset(text, offset);
+        (line, offset - self.offset_of_line(text, line))
+    }
+
+    fn line_col_to_offset(&self, text: &Rope, line: usize, col: usize) -> usize {
+        let mut offset = self.offset_of_line(text, line).saturating_add(col);
+        if offset >= text.len() {
+            offset = text.len();
+            if self.line_of_offset(text, offset) <= line {
+                return offset;
+            }
+        } else {
+            // Snap to grapheme cluster boundary
+            offset = text.prev_grapheme_offset(offset + 1).unwrap();
+        }
+
+        // clamp to end of line
+        let next_line_offset = self.offset_of_line(text, line + 1);
+        if offset >= next_line_offset {
+            if let Some(prev) = text.prev_grapheme_offset(next_line_offset) {
+                offset = prev;
+            }
+        }
+        offset
+    }
+}
+
+impl ViewMovement for View {
+    fn offset_of_line(&self, text: &Rope, line: usize) -> usize {
+        self.offset_of_line(text, line)
+    }
+
+    fn line_of_offset(&self, text: &Rope, offset: usize) -> usize {
+        self.line_of_offset(text, offset)
+    }
+}
+
+pub struct NoView;
+
+impl ViewMovement for NoView {}
+
 pub struct View {
     view_id: ViewId,
     buffer_id: BufferId,
@@ -231,7 +298,7 @@ impl View {
         }
     }
 
-    pub(crate) fn do_edit(&mut self, text: &Rope, cmd: ViewEvent) {
+    pub fn do_edit(&mut self, text: &Rope, cmd: ViewEvent) {
         use self::ViewEvent::*;
         match cmd {
             Move(movement) => self.do_move(text, movement, false),
@@ -885,43 +952,6 @@ impl View {
         b.add_span(height, 0, 0);
         b.set_dirty(true);
         self.lc_shadow = b.build();
-    }
-
-    // How should we count "column"? Valid choices include:
-    // * Unicode codepoints
-    // * grapheme clusters
-    // * Unicode width (so CJK counts as 2)
-    // * Actual measurement in text layout
-    // * Code units in some encoding
-    //
-    // Of course, all these are identical for ASCII. For now we use UTF-8 code units
-    // for simplicity.
-
-    pub(crate) fn offset_to_line_col(&self, text: &Rope, offset: usize) -> (usize, usize) {
-        let line = self.line_of_offset(text, offset);
-        (line, offset - self.offset_of_line(text, line))
-    }
-
-    pub(crate) fn line_col_to_offset(&self, text: &Rope, line: usize, col: usize) -> usize {
-        let mut offset = self.offset_of_line(text, line).saturating_add(col);
-        if offset >= text.len() {
-            offset = text.len();
-            if self.line_of_offset(text, offset) <= line {
-                return offset;
-            }
-        } else {
-            // Snap to grapheme cluster boundary
-            offset = text.prev_grapheme_offset(offset + 1).unwrap();
-        }
-
-        // clamp to end of line
-        let next_line_offset = self.offset_of_line(text, line + 1);
-        if offset >= next_line_offset {
-            if let Some(prev) = text.prev_grapheme_offset(next_line_offset) {
-                offset = prev;
-            }
-        }
-        offset
     }
 
     /// Returns the byte range of the currently visible lines.
