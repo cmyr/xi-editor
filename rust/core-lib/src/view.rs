@@ -45,16 +45,15 @@ const FLAG_SELECT: u64 = 2;
 /// Size of batches as number of bytes used during incremental find.
 const FIND_BATCH_SIZE: usize = 500000;
 
-
-    // How should we count "column"? Valid choices include:
-    // * Unicode codepoints
-    // * grapheme clusters
-    // * Unicode width (so CJK counts as 2)
-    // * Actual measurement in text layout
-    // * Code units in some encoding
-    //
-    // Of course, all these are identical for ASCII. For now we use UTF-8 code units
-    // for simplicity.
+// How should we count "column"? Valid choices include:
+// * Unicode codepoints
+// * grapheme clusters
+// * Unicode width (so CJK counts as 2)
+// * Actual measurement in text layout
+// * Code units in some encoding
+//
+// Of course, all these are identical for ASCII. For now we use UTF-8 code units
+// for simplicity.
 /// A trait for conversions that may depend on the presence of linebreaks.
 /// This lets us use different sources of this information depending on
 /// whether or not breaks are present.

@@ -365,7 +365,8 @@ impl Editor {
     }
 
     fn delete_backward(&mut self, view: &View, config: &BufferItems) {
-        if let Some(delta) = edit_ops::delete_backward(&self.text, view, view.sel_regions(), config) {
+        if let Some(delta) = edit_ops::delete_backward(&self.text, view, view.sel_regions(), config)
+        {
             self.this_edit_type = EditType::Delete;
             self.add_delta(delta);
         }
@@ -384,7 +385,14 @@ impl Editor {
         save: bool,
         kill_ring: &mut Rope,
     ) {
-        if let Some(delta) = edit_ops::delete_by_movement(&self.text, view, view.sel_regions(), movement, save, kill_ring) {
+        if let Some(delta) = edit_ops::delete_by_movement(
+            &self.text,
+            view,
+            view.sel_regions(),
+            movement,
+            save,
+            kill_ring,
+        ) {
             self.this_edit_type = EditType::Delete;
             self.add_delta(delta);
         }
@@ -967,14 +975,19 @@ fn count_lines(s: &str) -> usize {
 pub mod edit_ops {
     use std::borrow::Cow;
 
-    use xi_rope::{DeltaBuilder, Interval, Rope, RopeDelta};
-    use crate::view::ViewMovement;
-    use crate::selection::{Selection, SelRegion};
     use crate::backspace::offset_for_delete_backwards;
-    use crate::movement::{Movement, region_movement};
     use crate::config::BufferItems;
+    use crate::movement::{region_movement, Movement};
+    use crate::selection::{SelRegion, Selection};
+    use crate::view::ViewMovement;
+    use xi_rope::{DeltaBuilder, Interval, Rope, RopeDelta};
 
-    pub fn delete_backward<V: ViewMovement>(text: &Rope, view: &V, regions: &[SelRegion], config: &BufferItems) -> Option<RopeDelta> {
+    pub fn delete_backward<V: ViewMovement>(
+        text: &Rope,
+        view: &V,
+        regions: &[SelRegion],
+        config: &BufferItems,
+    ) -> Option<RopeDelta> {
         // TODO: this function is workable but probably overall code complexity
         // could be improved by implementing a "backspace" movement instead.
         let mut builder = DeltaBuilder::new(text.len());

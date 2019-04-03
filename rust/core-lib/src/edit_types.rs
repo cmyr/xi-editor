@@ -20,8 +20,8 @@
 
 use crate::movement::Movement;
 use crate::rpc::{
-    EditNotification, FindQuery, GestureType, LineRange, MouseAction, Position,
-    SelectionGranularity, SelectionModifier, Rect,
+    EditNotification, FindQuery, GestureType, LineRange, MouseAction, Position, Rect,
+    SelectionGranularity, SelectionModifier,
 };
 use crate::view::Size;
 

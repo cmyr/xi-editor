@@ -19,7 +19,7 @@ use std::iter;
 
 use crate::annotations::{AnnotationSlice, AnnotationType, ToAnnotation};
 use crate::selection::{InsertDrift, SelRegion, Selection};
-use crate::view::{ViewMovement, View};
+use crate::view::{View, ViewMovement};
 use crate::word_boundaries::WordCursor;
 use regex::{Regex, RegexBuilder};
 use xi_rope::delta::DeltaRegion;

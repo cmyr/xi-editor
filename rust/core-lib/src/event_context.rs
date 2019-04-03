@@ -45,7 +45,7 @@ use crate::syntax::LanguageId;
 use crate::tabs::{
     BufferId, PluginId, ViewId, FIND_VIEW_IDLE_MASK, RENDER_VIEW_IDLE_MASK, REWRAP_VIEW_IDLE_MASK,
 };
-use crate::view::{ViewMovement, View};
+use crate::view::{View, ViewMovement};
 use crate::width_cache::WidthCache;
 use crate::WeakXiCore;
 
