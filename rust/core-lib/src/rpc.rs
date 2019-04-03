@@ -30,6 +30,23 @@ use crate::syntax::LanguageId;
 use crate::tabs::ViewId;
 use crate::view::Size;
 
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq)]
+pub struct Rect {
+    x: usize,
+    y: usize,
+    width: usize,
+    height: usize,
+}
+
+impl Rect {
+    pub fn zero() -> Self {
+        Rect { x: 0, y: 0, width: 0, height: 0 }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.width == 0 || self.height == 0
+    }
+}
 // =============================================================================
 //  Command types
 // =============================================================================
@@ -439,6 +456,7 @@ pub enum EditNotification {
     AddSelectionBelow,
     Scroll(LineRange),
     Resize(Size),
+    ViewportChange(Rect),
     GotoLine {
         line: u64,
     },

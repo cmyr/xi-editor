@@ -161,6 +161,7 @@ impl<'a> EventContext<'a> {
                     self.update_wrap_settings(false);
                 }
             }
+            SpecialEvent::ViewportChange(_) => (),
             SpecialEvent::DebugRewrap | SpecialEvent::DebugWrapWidth => {
                 warn!("debug wrapping methods are removed, use the config system")
             }

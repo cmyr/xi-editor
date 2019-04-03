@@ -21,7 +21,7 @@
 use crate::movement::Movement;
 use crate::rpc::{
     EditNotification, FindQuery, GestureType, LineRange, MouseAction, Position,
-    SelectionGranularity, SelectionModifier,
+    SelectionGranularity, SelectionModifier, Rect,
 };
 use crate::view::Size;
 
@@ -83,6 +83,7 @@ pub enum SpecialEvent {
     DebugWrapWidth,
     DebugPrintSpans,
     Resize(Size),
+    ViewportChange(Rect),
     RequestLines(LineRange),
     RequestHover { request_id: usize, position: Option<Position> },
     DebugToggleComment,
@@ -218,6 +219,7 @@ impl From<EditNotification> for EventDomain {
             AddSelectionBelow => ViewEvent::AddSelectionBelow.into(),
             Scroll(range) => ViewEvent::Scroll(range).into(),
             Resize(size) => SpecialEvent::Resize(size).into(),
+            ViewportChange(rect) => SpecialEvent::ViewportChange(rect).into(),
             GotoLine { line } => ViewEvent::GotoLine { line }.into(),
             RequestLines(range) => SpecialEvent::RequestLines(range).into(),
             Yank => BufferEvent::Yank.into(),
