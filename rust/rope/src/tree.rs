@@ -221,6 +221,10 @@ impl<N: NodeInfo> Node<N> {
         self.len() == 0
     }
 
+    pub(crate) fn get_info(&self) -> &N {
+        &self.0.info
+    }
+
     fn height(&self) -> usize {
         self.0.height
     }
@@ -976,6 +980,20 @@ impl<'c, 'a, N: NodeInfo, M: Metric<N>> CursorIter<'c, 'a, N, M> {
     /// [`Cursor`]: struct.Cursor.html
     pub fn pos(&self) -> usize {
         self.cursor.pos()
+    }
+}
+
+impl<N: std::fmt::Debug + NodeInfo> std::fmt::Debug for Node<N>
+where
+    N::L: std::fmt::Debug,
+{
+    fn fmt(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+        self.0.info.fmt(formatter)?;
+        formatter.write_str(" ")?;
+        match &self.0.val {
+            NodeVal::Internal(nodes) => formatter.debug_list().entries(nodes).finish(),
+            NodeVal::Leaf(leaf) => leaf.fmt(formatter),
+        }
     }
 }
 

@@ -563,14 +563,14 @@ impl<'a> RewrapCtx<'a> {
     }
 }
 
-struct LineBreakCursor<'a> {
+pub struct LineBreakCursor<'a> {
     inner: Cursor<'a, RopeInfo>,
     lb_iter: LineBreakLeafIter,
     last_byte: u8,
 }
 
 impl<'a> LineBreakCursor<'a> {
-    fn new(text: &'a Rope, pos: usize) -> LineBreakCursor<'a> {
+    pub fn new(text: &'a Rope, pos: usize) -> LineBreakCursor<'a> {
         let inner = Cursor::new(text, pos);
         let lb_iter = match inner.get_leaf() {
             Some((s, offset)) => LineBreakLeafIter::new(s.as_str(), offset),
@@ -580,7 +580,7 @@ impl<'a> LineBreakCursor<'a> {
     }
 
     // position and whether break is hard; up to caller to stop calling after EOT
-    fn next(&mut self) -> (usize, bool) {
+    pub fn next(&mut self) -> (usize, bool) {
         let mut leaf = self.inner.get_leaf();
         loop {
             match leaf {

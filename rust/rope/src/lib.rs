@@ -37,6 +37,7 @@ extern crate serde_json;
 extern crate serde_test;
 
 pub mod breaks;
+pub mod breaks2;
 pub mod compare;
 pub mod delta;
 pub mod diff;
