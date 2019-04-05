@@ -579,6 +579,10 @@ impl<'a> LineBreakCursor<'a> {
         LineBreakCursor { inner, lb_iter, last_byte: 0 }
     }
 
+    pub fn get_text(&self) -> &Rope {
+        self.inner.root()
+    }
+
     // position and whether break is hard; up to caller to stop calling after EOT
     pub fn next(&mut self) -> (usize, bool) {
         let mut leaf = self.inner.get_leaf();
