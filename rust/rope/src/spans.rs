@@ -303,11 +303,11 @@ impl<T: Clone> Spans<T> {
 }
 
 //impl<T: Clone + fmt::Debug> fmt::Debug for Spans<T> {
-    //fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        //let strs =
-            //self.iter().map(|(iv, val)| format!("{}: {:?}", iv, val)).collect::<Vec<String>>();
-        //write!(f, "len: {}\nspans:\n\t{}", self.len(), &strs.join("\n\t"))
-    //}
+//fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+//let strs =
+//self.iter().map(|(iv, val)| format!("{}: {:?}", iv, val)).collect::<Vec<String>>();
+//write!(f, "len: {}\nspans:\n\t{}", self.len(), &strs.join("\n\t"))
+//}
 //}
 
 impl<'a, T: Clone> Iterator for SpanIter<'a, T> {

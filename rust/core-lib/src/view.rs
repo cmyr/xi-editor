@@ -108,11 +108,8 @@ impl ViewMovement for View {
 }
 
 impl ViewMovement for xi_rope::breaks2::Breaks {
-    fn offset_of_line(&self, text: &Rope, line: usize) -> usize {
-        match line {
-            n if n >= self.count::<xi_rope::breaks2::BreaksMetric>(self.len()) => text.len(),
-            _else => self.count_base_units::<xi_rope::breaks2::BreaksMetric>(_else),
-        }
+    fn offset_of_line(&self, _text: &Rope, line: usize) -> usize {
+        self.count_base_units::<xi_rope::breaks2::BreaksMetric>(line)
     }
 
     fn line_of_offset(&self, text: &Rope, offset: usize) -> usize {

@@ -38,6 +38,8 @@ pub struct BreaksLeaf {
     len: usize,
     /// Indexes, represent as offsets from the start of the leaf.
     data: Vec<(Offset, Width)>,
+    /// the width of the trailing line, if any
+    no_break_width: usize,
 }
 
 /// The number of breaks.
@@ -66,6 +68,7 @@ impl Leaf for BreaksLeaf {
         }
         // the min with other.len() shouldn't be needed
         self.len += min(end, other.len()) - start;
+        self.no_break_width = other.no_break_width;
 
         if self.data.len() <= MAX_LEAF {
             None
@@ -80,7 +83,9 @@ impl Leaf for BreaksLeaf {
 
             let new_len = self.len - splitpoint_units;
             self.len = splitpoint_units;
-            Some(BreaksLeaf { len: new_len, data: new })
+            let no_break_width = self.no_break_width;
+            self.no_break_width = 0;
+            Some(BreaksLeaf { len: new_len, data: new, no_break_width })
         }
     }
 }
@@ -95,7 +100,7 @@ impl NodeInfo for BreaksInfo {
 
     fn compute_info(l: &BreaksLeaf) -> BreaksInfo {
         let count = l.data.len();
-        let max_width = l.data.iter().map(|(_, w)| *w).max().unwrap_or(0);
+        let max_width = l.data.iter().map(|(_, w)| *w).max().unwrap_or(0).max(l.no_break_width);
         BreaksInfo { count, max_width }
     }
 }
@@ -122,7 +127,7 @@ impl Metric<BreaksInfo> for BreaksMetric {
 
     fn to_base_units(l: &BreaksLeaf, in_measured_units: usize) -> usize {
         if in_measured_units > l.data.len() {
-            l.len + 1
+            l.len
         } else if in_measured_units == 0 {
             0
         } else {
@@ -210,8 +215,8 @@ impl Metric<BreaksInfo> for BreaksBaseMetric {
 impl Breaks {
     // a length with no break, useful in edit operations; for
     // other use cases, use the builder.
-    pub fn new_no_break(len: usize) -> Breaks {
-        let leaf = BreaksLeaf { len, data: vec![] };
+    pub fn new_no_break(len: usize, width: usize) -> Breaks {
+        let leaf = BreaksLeaf { len, data: vec![], no_break_width: width };
         Node::from_leaf(leaf)
     }
 
@@ -243,10 +248,12 @@ impl BreakBuilder {
         }
         self.leaf.len += len;
         self.leaf.data.push((self.leaf.len, width));
+        self.leaf.no_break_width = 0;
     }
 
-    pub fn add_no_break(&mut self, len: usize) {
+    pub fn add_no_break(&mut self, len: usize, width: usize) {
         self.leaf.len += len;
+        self.leaf.no_break_width = width;
     }
 
     pub fn build(mut self) -> Breaks {
