@@ -832,6 +832,8 @@ impl Editor {
             DuplicateLine => self.duplicate_line(view, config),
             IncreaseNumber => self.change_number(view, |s| s.checked_add(1)),
             DecreaseNumber => self.change_number(view, |s| s.checked_sub(1)),
+            Cut => panic!("async cut/copy do not exist in legacy xi"),
+            ToggleComment => panic!("ToggleComment does not exist in legacy xi"),
         }
     }
 
@@ -1087,7 +1089,10 @@ pub mod edit_ops {
 
     /// Extracts non-caret selection regions into a string,
     /// joining multiple regions with newlines.
-    fn extract_sel_regions<'a>(text: &'a Rope, sel_regions: &[SelRegion]) -> Option<Cow<'a, str>> {
+    pub fn extract_sel_regions<'a>(
+        text: &'a Rope,
+        sel_regions: &[SelRegion],
+    ) -> Option<Cow<'a, str>> {
         let mut saved = None;
         for region in sel_regions {
             if !region.is_caret() {

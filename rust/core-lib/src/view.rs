@@ -366,6 +366,7 @@ impl View {
             Replace { chars, preserve_case } => self.do_set_replace(chars, preserve_case),
             SelectionForReplace => self.do_selection_for_replace(text),
             SelectionIntoLines => self.do_split_selection_into_lines(text),
+            Copy => panic!("async cut/copy do not exist in legacy xi"),
         }
     }
 

@@ -405,6 +405,11 @@ pub struct FindQuery {
 #[serde(rename_all = "snake_case")]
 #[serde(tag = "method", content = "params")]
 pub enum EditNotification {
+    // ## these are only used in xi-toy ##
+    CutAsync,
+    CopyAsync,
+    ToggleComment,
+    // ##
     Insert {
         chars: String,
     },

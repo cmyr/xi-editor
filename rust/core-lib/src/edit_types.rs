@@ -28,6 +28,7 @@ use crate::view::Size;
 /// Events that only modify view state
 #[derive(Debug, PartialEq, Clone)]
 pub enum ViewEvent {
+    Copy,
     Move(Movement),
     ModifySelection(Movement),
     SelectAll,
@@ -54,6 +55,7 @@ pub enum ViewEvent {
 /// Events that modify the buffer
 #[derive(Debug, PartialEq, Clone)]
 pub enum BufferEvent {
+    Cut,
     Delete { movement: Movement, kill: bool },
     Backspace,
     Transpose,
@@ -64,6 +66,7 @@ pub enum BufferEvent {
     Capitalize,
     Indent,
     Outdent,
+    ToggleComment,
     Insert(String),
     Paste(String),
     InsertNewline,
@@ -123,6 +126,9 @@ impl From<EditNotification> for EventDomain {
     fn from(src: EditNotification) -> EventDomain {
         use self::EditNotification::*;
         match src {
+            CutAsync => BufferEvent::Cut.into(),
+            CopyAsync => ViewEvent::Copy.into(),
+            ToggleComment => BufferEvent::ToggleComment.into(),
             Insert { chars } =>
                 BufferEvent::Insert(chars).into(),
             Paste { chars } =>
