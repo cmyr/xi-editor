@@ -439,38 +439,9 @@ impl Editor {
     }
 
     fn insert_tab(&mut self, view: &View, config: &BufferItems) {
-        self.this_edit_type = EditType::InsertChars;
-        let mut builder = DeltaBuilder::new(self.text.len());
-        let const_tab_text = self.get_tab_text(config, None);
-
-        if view.sel_regions().len() > 1 {
-            // if we indent multiple regions or multiple lines (below),
-            // we treat this as an indentation adjustment; otherwise it is
-            // just inserting text.
-            self.this_edit_type = EditType::Indent;
-        }
-
-        for region in view.sel_regions() {
-            let line_range = view.get_line_range(&self.text, region);
-
-            if line_range.len() > 1 {
-                self.this_edit_type = EditType::Indent;
-                for line in line_range {
-                    let offset = view.line_col_to_offset(&self.text, line, 0);
-                    let iv = Interval::new(offset, offset);
-                    builder.replace(iv, Rope::from(const_tab_text));
-                }
-            } else {
-                let (_, col) = view.offset_to_line_col(&self.text, region.start);
-                let mut tab_size = config.tab_size;
-                tab_size = tab_size - (col % tab_size);
-                let tab_text = self.get_tab_text(config, Some(tab_size));
-
-                let iv = Interval::new(region.min(), region.max());
-                builder.replace(iv, Rope::from(tab_text));
-            }
-        }
-        self.add_delta(builder.build());
+        let (delta, edit_type) = edit_ops::insert_tab(&self.text, view.sel_regions(), config);
+        self.add_delta(delta);
+        self.this_edit_type = edit_type;
     }
 
     /// Indents or outdents lines based on selection and user's tab settings.
@@ -489,39 +460,9 @@ impl Editor {
             }
         }
         match direction {
-            IndentDirection::In => self.indent(view, lines, tab_text),
-            IndentDirection::Out => self.outdent(view, lines, tab_text),
+            IndentDirection::In => edit_ops::indent(&self.text, lines, tab_text),
+            IndentDirection::Out => edit_ops::outdent(&self.text, lines, tab_text),
         };
-    }
-
-    fn indent(&mut self, view: &View, lines: BTreeSet<usize>, tab_text: &str) {
-        let mut builder = DeltaBuilder::new(self.text.len());
-        for line in lines {
-            let offset = view.line_col_to_offset(&self.text, line, 0);
-            let interval = Interval::new(offset, offset);
-            builder.replace(interval, Rope::from(tab_text));
-        }
-        self.this_edit_type = EditType::InsertChars;
-        self.add_delta(builder.build());
-    }
-
-    fn outdent(&mut self, view: &View, lines: BTreeSet<usize>, tab_text: &str) {
-        let mut builder = DeltaBuilder::new(self.text.len());
-        for line in lines {
-            let offset = view.line_col_to_offset(&self.text, line, 0);
-            let tab_offset = view.line_col_to_offset(&self.text, line, tab_text.len());
-            let interval = Interval::new(offset, tab_offset);
-            let leading_slice = self.text.slice_to_cow(interval.start()..interval.end());
-            if leading_slice == tab_text {
-                builder.delete(interval);
-            } else if let Some(first_char_col) = leading_slice.find(|c: char| !c.is_whitespace()) {
-                let first_char_offset = view.line_col_to_offset(&self.text, line, first_char_col);
-                let interval = Interval::new(offset, first_char_offset);
-                builder.delete(interval);
-            }
-        }
-        self.this_edit_type = EditType::Delete;
-        self.add_delta(builder.build());
     }
 
     fn get_tab_text(&self, config: &BufferItems, tab_size: Option<usize>) -> &'static str {
@@ -1013,6 +954,7 @@ fn count_lines(s: &str) -> usize {
 
 pub mod edit_ops {
     use std::borrow::Cow;
+    use std::ops::Range;
 
     use crate::backspace::offset_for_delete_backwards;
     use crate::config::BufferItems;
@@ -1020,6 +962,8 @@ pub mod edit_ops {
     use crate::selection::{SelRegion, Selection};
     use crate::view::ViewMovement;
     use xi_rope::{DeltaBuilder, Interval, Rope, RopeDelta};
+
+    use super::{n_spaces, EditType};
 
     pub fn delete_backward<V: ViewMovement>(
         text: &Rope,
@@ -1087,6 +1031,66 @@ pub mod edit_ops {
         builder.build()
     }
 
+    pub fn insert_tab(
+        text: &Rope,
+        regions: &[SelRegion],
+        config: &BufferItems,
+    ) -> (RopeDelta, EditType) {
+        let mut builder = DeltaBuilder::new(text.len());
+        let use_spaces = config.translate_tabs_to_spaces;
+        let const_tab_text = get_tab_text(use_spaces, config.tab_size);
+        let mut edit_type = EditType::InsertChars;
+
+        if regions.len() > 1 {
+            // if we indent multiple regions or multiple lines (below),
+            // we treat this as an indentation adjustment; otherwise it is
+            // just inserting text.
+            edit_type = EditType::Indent;
+        }
+
+        for region in regions {
+            let line_range = get_line_range(text, region);
+
+            if line_range.len() > 1 {
+                edit_type = EditType::Indent;
+                for line in line_range {
+                    let offset = text.offset_of_line(line);
+                    let iv = Interval::new(offset, offset);
+                    builder.replace(iv, Rope::from(const_tab_text));
+                }
+            } else {
+                let col = region.start - text.offset_of_line(line_range.start);
+                let mut tab_size = config.tab_size;
+                tab_size = tab_size - (col % tab_size);
+                let tab_text = get_tab_text(use_spaces, tab_size);
+
+                let iv = Interval::new(region.min(), region.max());
+                builder.replace(iv, Rope::from(tab_text));
+            }
+        }
+        (builder.build(), edit_type)
+    }
+
+    //NOTE: copied from view to expose to xi-toy
+    /// Returns the lines included in a region.
+    fn get_line_range(text: &Rope, region: &SelRegion) -> Range<usize> {
+        let first_line = text.line_of_offset(region.min());
+        let mut last_line = text.line_of_offset(region.max());
+        let last_off = text.offset_of_line(last_line);
+        let last_col = region.max() - last_off;
+
+        //let (mut last_line, last_col) = self.offset_to_line_col(text, region.max());
+        if last_col == 0 && last_line > first_line {
+            last_line -= 1;
+        }
+        first_line..(last_line + 1)
+    }
+
+    fn get_tab_text(use_spaces: bool, tab_size: usize) -> &'static str {
+        let tab_text = if use_spaces { n_spaces(tab_size) } else { "\t" };
+        tab_text
+    }
+
     /// Extracts non-caret selection regions into a string,
     /// joining multiple regions with newlines.
     pub fn extract_sel_regions<'a>(
@@ -1125,6 +1129,39 @@ pub mod edit_ops {
         }
     }
 
+    pub fn indent(
+        text: &Rope,
+        lines: impl IntoIterator<Item = usize>,
+        tab_text: &str,
+    ) -> RopeDelta {
+        let mut builder = DeltaBuilder::new(text.len());
+        for line in lines {
+            let offset = text.offset_of_line(line);
+            let interval = Interval::new(offset, offset);
+            builder.replace(interval, Rope::from(tab_text));
+        }
+        builder.build()
+    }
+
+    pub fn outdent(
+        text: &Rope,
+        lines: impl IntoIterator<Item = usize>,
+        tab_text: &str,
+    ) -> RopeDelta {
+        let mut builder = DeltaBuilder::new(text.len());
+        for line in lines {
+            let offset = text.offset_of_line(line);
+            let interval = Interval::new(offset, offset + tab_text.len());
+            let leading_slice = text.slice_to_cow(interval);
+            if leading_slice == tab_text {
+                builder.delete(interval);
+            } else if let Some(first_char_col) = leading_slice.find(|c: char| !c.is_whitespace()) {
+                let interval = Interval::new(offset, offset + first_char_col);
+                builder.delete(interval);
+            }
+        }
+        builder.build()
+    }
 }
 
 #[cfg(test)]
